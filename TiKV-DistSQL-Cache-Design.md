@@ -34,6 +34,26 @@ LRU Cache 目前来看是个比较简单高效的 Cache 策略，但是 DistSQL 
 
 对于计算结果非常大的 DistSQL 来说，网络传输所占用的时间大概率会成为性能瓶颈（近乎全量导出数据到 TiDB 端），所以目前非 TopN，Aggregation 的 DistSQL 不予缓存。
 
+## Cache 的特性
+
+在实践过程中发现一个 DistSQL Cache 的特性。由于 DistSQL 是根据 Region 和 KeyRange 进行区分的，那么当 OLAP 的查询语句中 Where 子句中的条件不变，只是扫描的行数增加或者减少，那么之前的 Cache 也会命中。例如：
+
+如果表结构为：
+
+```
+CREATE TABLE test (
+    `id` INT PRIMARY KEY,
+    `domain_name` VARCHAR(255),
+    `date` VARCHAR(10),
+    `count` BIGINT,
+);
+```
+第一次查询语句为：`SELECT SUM(count) FROM test WHERE id BETWEEN 0 AND 1000 GROUP BY date`
+
+第二次查询语句为：`SELECT SUM(count) FROM test WHERE id BETWEEN 0 AND 2000 GROUP BY date`
+
+同时 0~1000 在 Region 1，1001~2000 在 Region 2。那么第二次查询会命中 Region 1 的 Cache，同时计算 Region 2 的结果。因此，计算时间大约会减半。
+
 ## Cache 未来的改进
 
 以下是针对 LRU Cache 的一些改进想法，还未实现：
@@ -49,5 +69,5 @@ LRU Cache 目前来看是个比较简单高效的 Cache 策略，但是 DistSQL 
 
 ## 线上测试结果
 
-DistSQL Cache 可以提高重复查询的响应速度，同时对于聚合和 TopN 类型的查询起结果也不会很大，1000 个 Cache Item 所占用的内存基本上在 50MB 一下。
+DistSQL Cache 可以提高重复查询的响应速度，同时对于聚合和 TopN 类型的查询起结果也不会很大，1000 个 Cache Item 所占用的内存基本上在 50MB 以下。
 
