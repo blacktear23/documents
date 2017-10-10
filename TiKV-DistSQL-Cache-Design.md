@@ -69,5 +69,15 @@ CREATE TABLE test (
 
 ## 线上测试结果
 
-DistSQL Cache 可以提高重复查询的响应速度，同时对于聚合和 TopN 类型的查询起结果也不会很大，1000 个 Cache Item 所占用的内存基本上在 50MB 以下。
+DistSQL Cache 可以提高重复查询的响应速度，同时对于聚合和 TopN 类型的查询其结果占用的字节数也不会很大，1000 个 Cache Item 所占用的内存基本上在 50MB 以下。
 
+由于线上项目的 Web 服务和数据导入服务是两套程序，所以在 Web 服务中使用 Memcached 进行缓存会引入复杂的缓存失效策略。同时对比 DistSQL Cache 中的失效粒度来看，Memcached 的缓存失效粒度更大，二期对于重复计算没有更好的优化。
+
+目前线上项目的用法有两种：
+
+1. 查询一天的各个域名的访问情况，并根据某个指标排序，同时提供翻页。其 SQL 类似：`SELECT * FROM some_table WHERE id BETWEEN 201709010000000000 AND 20170901999999999 ORDER BY some_column DESC LIMIT 0, 20`
+2. 按天聚合所有域名的访问情况。其 SQL 类似：`SELECT SUM(column_a), SUM(column_b) ... FROM some_table WHERE id BETWEEN 201709010000000000 AND 201709079999999999 GROUP BY date`
+
+在第一种场景下，未命中缓存的情况下，API 响应速度在 1s ~ 2s，命中缓存的情况下，API 响应速度在 100ms ~ 400ms 。
+
+在第二种场景下，未命中缓存的情况下，API 响应速度受到日期范围的影响，一个月数据的聚合在冷数据和未命中缓存情况下 API 响应时间会大于 30s，如果一个月的缓存已建立，那么选择半个月时间段聚合的话，API 响应时间会在 ms 级别。如果新的聚合时间区间比已建立的缓存时间段多 1 天的话，API 响应时间会在 1s ~ 3s。
