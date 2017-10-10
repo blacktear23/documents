@@ -52,7 +52,7 @@ CREATE TABLE test (
 
 第二次查询语句为：`SELECT SUM(count) FROM test WHERE id BETWEEN 0 AND 2000 GROUP BY date`
 
-同时 0~1000 在 Region 1，1001~2000 在 Region 2。那么第二次查询会命中 Region 1 的 Cache，同时计算 Region 2 的结果。因此，计算时间大约会减半。
+同时 0\~1000 在 Region 1，1001\~2000 在 Region 2。那么第二次查询会命中 Region 1 的 Cache，同时计算 Region 2 的结果。因此，计算时间大约会减半。
 
 ## Cache 未来的改进
 
