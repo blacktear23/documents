@@ -17,7 +17,7 @@
 [1]    86379 segmentation fault (core dumped)  ./tikv-server -C tikv.toml
 ```
 
-想起了之前 PingCAP 同学说过，TiKV，PD 和 TiDB 版本不同有可能会导致 RPC 协议数据格式的版本不同，然后会导致 Segment Fault。好吧，先把 PD 和 TiDB 都升级到最新的代码试试。
+想起了之前 PingCAP 同学说过，TiKV，PD 和 TiDB 版本不同有可能会导致 RPC 协议数据格式的版本不同，然后会导致 Segment Fault。先把 PD 和 TiDB 都升级到最新的代码试试。
 
 经过大约3分钟的编译，重新启动。然后 TiKV 仍旧 Segment Fault。好吧，看来是个大新闻。联系到了 PingCAP 的同学并向他们报了障。几分钟之后，PingCAP 那边的同学也反馈遇到了类似的问题，不过 Linux 下 build 的版本并没有遇到任何问题。
 
@@ -39,22 +39,22 @@
 ...
 ```
 
-这下子好了，至少找到引起 Segment Fault 的位置了：`rocksdb`。随即上 github 上查看了 TiKV 跟 `rust-rocksdb` 库相关的提交。总共找到了 3 个 PR 跟升级 `rust-rocksdb` 有关。接下来就可以做一些验证，找到引入问题的那个提交。
+这下子好了，至少找到了引起 Segment Fault 的位置：`rocksdb`。随即上 github 上查看了 TiKV 跟 `rust-rocksdb` 库相关的提交。总共找到了 3 个 PR 跟升级 `rust-rocksdb` 有关。接下来就可以做一些验证，找到引入问题的那个提交。
 
 ## 山穷水尽
 
-找到了 3 个可以的嫌疑人（PR），那么挨个 Revert 然后 `make release` 最终定位到了最早的那个 PR 就是引入问题的罪魁祸首。
+找到了 3 个可疑的 PR，那么挨个 Revert 然后 `make release` 最终定位到了最早的那个 PR 就是引入问题的罪魁祸首。
 
-在拿到了这个证据之后，随机就跟 PingCAP 的同学进行讨论。发现这个 PR 的代码跟 RocksDB 的官方代码有细微的不同。但是他们也是在改进之后也没解决这个问题。然后 按照 PingCAP 的同学说用 `make unportable_release` build 确实没出现 Segment Fault 的问题。
+在拿到了这个证据之后，随即跟 PingCAP 的同学进行讨论。发现这个 PR 的代码跟 RocksDB 的官方代码有细微的不同，但是他们在改进之后并没有解决问题。然后按照 PingCAP 的同学说用 `make unportable_release` build TiKV 确实没出现 Segment Fault 的问题。
 
-看来这个问题真是难缠。难道这两个 build 模式又有什么不同么？抱着这个问题开始翻阅 TiKV 和 rust-rocksdb 两个项目的编译脚本。最终差别还是找到了：
+看来这个问题真是难缠。难道这两个 build 模式又有什么不同么？抱着这个问题开始翻阅 TiKV 和 rust-rocksdb 两个项目的编译脚本。最终找到了差别：
 
 * make release 会在 cc 后面加入 `-msse42` 参数
 * make unportable_release 会在 cc 后面加入 `-march=native` 同时没有 `-msse42` 参数
 
-这下明确了一点，这个 Segment Fault 大概率跟 SSE 指令相关的代码有关。根据这个线索，找到了 RocksDB 中的 `util/crc32c.cc` 文件。行数不多，但使用的跟 SSE 相关的函数经过排查发现是系统默认提供的。再一次无功而返。
+这下明确了一点，这个 Segment Fault 大概率跟 SSE 指令相关的代码有关。根据这个线索，找到了 RocksDB 中的 `util/crc32c.cc` 文件。行数不多，但使用的跟 SSE 相关的函数经过排查发现是系统提供的。再一次无功而返。
 
-这时想起了 lldb 中的反汇编工具，看看到底是死在哪里了：
+这时想起了 lldb 中的反汇编工具，看看程序到底是死在哪里了：
 
 ```
 ...
@@ -79,7 +79,7 @@
 
 ## 柳暗花明
 
-一路排查到这里，到头来还是什么有价值的东西都没找出来。在仔细整理了思路之后发现整个案件还有一个证据没有找到，Segment Fault 的实际原因。既然没法从 syslog 中找到对应的日志，那么在 lldb 中运行一下呢？
+一路排查到这里，到头来还是什么有价值的东西都没找出来。在仔细整理了思路之后发现整个案件还有一个证据没有找到，Segment Fault 的原因。既然没法从 syslog 中找到对应的日志，那么在 lldb 中运行一下呢？
 
 ```
 2017/12/18 11:12:59.553 tikv-server.rs:146: [WARN] environment variable `TZ` is missing, use `/etc/localtime`
@@ -141,7 +141,7 @@ General Purpose Registers:
 
 在找到这些线索之后，跟 PingCAP 的同学也交流了一下，最后 PingCAP 的同学也确认了这个问题的锅应该是编译器来背。
 
-**MacOS 下 Xcode 9.2 携带的 clang 4.9 会有使用 `movaps` 指令单并没做好地址对齐的问题，升级到 clang 5.0 之后指令会被替换成 `vmovups` 问题就解决了**
+**MacOS 下 Xcode 9.2 携带的 clang 4.9 会有使用 `movaps` 指令但并没做好地址对齐的问题，升级到 clang 5.0 之后指令会被替换成 `movups` 问题就解决了**
 
 既然问题的原因找到了，在生产系统上跑的 TiKV 可以放心了。但是使用装了 clang 4.9 的 MacOS 的同学在开发 TiKV 的时候还是尽量使用 `make unportable_release` 来编译并测试。
 
