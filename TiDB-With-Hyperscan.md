@@ -43,11 +43,11 @@ SELECT HS_MATCH(`data`, (SELECT HS_BUILDDB(`id`, `pattern`) FROM `pattern_table`
 
 而说 Aggregation Function 实现起来比较分散主要是在周边的配套设施：
 
-1. Aggregation Function Builder (在`executor/aggfuncs/builder.go`)
-2. Aggregation Function 的 Protocol Buffer 的互相转换 (在`expression/aggregation/agg_to_pb.go`) 
-3. Aggregation Function 的执行类型推断（在`expression/aggregation/base_func.go`)
-4. 针对 Aggregation Function Not Null 的处理（在`expression/aggregation/descriptor.go`）
-5. 指定 Aggregation Function 是否支持 TiKV 下推（在`planner/core/rule_aggregation_push_down.go`)
+1. Aggregation Function Builder (在`executor/aggfuncs/builder.go`中的`Build`函数)
+2. Aggregation Function 的 Protocol Buffer 的互相转换 (在`expression/aggregation/agg_to_pb.go`的`AggFuncToPBExpr`和`PBExprToAggFuncDesc`函数) 
+3. Aggregation Function 的执行类型推断（在`expression/aggregation/base_func.go`的`typeInfer`函数)
+4. 针对 Aggregation Function Not Null 的处理（在`expression/aggregation/descriptor.go`的`UpdateNotNullFlag4RetType`函数）
+5. 指定 Aggregation Function 是否支持 TiKV 下推（在`planner/core/rule_aggregation_push_down.go`的`isDecomposableWithJoin`和`isDecomposableWithUnion`函数)
 
 在实现完 `AggFunc` 接口之后，只有找到这些配套设施的位置，加以修改才能让聚合函数正常运行。而且以上绝大部分的函数都是用 `swtich` 语句来区分聚合函数的。其实这对于条件编译并不友好。
 
@@ -106,6 +106,46 @@ func Build(ctx sessionctx.Context, aggFuncDesc *aggregation.AggFuncDesc, ordinal
 		return buildStddevSamp(aggFuncDesc, ordinal)
 	}
 	return buildFromExtensionAggFuncs(ctx, aggFuncDesc, ordinal)
+}
+```
+
+## Scratch 复用
+
+Hyperscan 有一个概念叫 Scratch，每个线程可以创建一个 Thread Local 的 Scratch 对象，可以在循环调用 match 族函数的时候复用，以提高匹配的性能。所以在 Scalar Function 针对多行数据做匹配操作的时候，一次性创建一个 Scratch 对象然后在循环中使用这个 Scratch 对象可以大大提高匹配的速度（实测每次匹配时创建 Scratch 然后销毁对性能的影响非常大）。
+
+但是 Scratch 的文档中明确说明不能多线程共享，好在 TiDB 并不会用多 goroutine 并行执行 Scalar Function（与 PingCAP 的同学确认的），所以并不存在 Scratch 被多线程共享的问题。所以在 Scalar Function 在第一次调用 evalXXX 函数的时候初始化好 Scratch 对象以供后续调用复用就可以了。
+
+## 内存清理
+重复分配 Scratch 的性能问题解决了，但是还有个问题：Scalar Function 对象本身并不知道什么时候 SQL 执行完毕，也就没法做确定性资源清理。由于 TiDB 的其他 Scalar Function 并不涉及到资源回收的问题，也就没有对应的回调函数告知 Scalar Function 对象它所对应的 SQL 语句已经执行完毕。但是 Hyperscan 的 Database 和 Scratch 是要明确调用 `Close()` 和 `Free()` 函数来回收资源的。放任不管肯定是会内存泄漏的。
+
+好在 Golang 的 runtime 包提供了 `SetFinalizer` 函数可以在 GC 销毁某个对象时调用一个回调函数。因此对于 Hyperscan 的 Database 和 Scratch 就可以使用下面的方式进行资源的回收：
+
+```go
+func (b *baseBuiltinHsSig) initScratch() error {
+	if b.scratch != nil {
+		return nil
+	}
+	scratch, err := hs.NewScratch(b.db)
+	if err != nil {
+		return err
+	}
+	b.scratch = scratch
+	runtime.SetFinalizer(scratch, func(hsScratch *hs.Scratch) {
+		hsScratch.Free()
+	})
+	return nil
+}
+
+func buildBlockDBFromBase64(base64Data string) (hs.BlockDatabase, int, error) {
+	data, err := base64.StdEncoding.DecodeString(base64Data)
+	if err != nil {
+		return nil, 0, err
+	}
+	db, err := hs.UnmarshalBlockDatabase(data)
+	runtime.SetFinalizer(db, func(hsdb hs.BlockDatabase) {
+		hsdb.Close()
+	})
+	return db, 0, err
 }
 ```
 
